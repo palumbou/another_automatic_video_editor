@@ -1,0 +1,131 @@
+{
+  "project": {
+    "title": "AWS User Group Salerno — Evento #1 (Full video)",
+    "date": "2026-01-15",
+    "location": "Salerno, Italy",
+    "language": "it",
+    "youtube": {
+      "channel_name": "AWS User Group Salerno",
+      "tags": [
+        "AWS",
+        "AWS User Group",
+        "Salerno",
+        "Cloud",
+        "Serverless",
+        "Meetup",
+        "DevOps"
+      ],
+      "links": {
+        "Meetup": "https://www.meetup.com/",
+        "LinkedIn": "https://www.linkedin.com/",
+        "Instagram": "https://www.instagram.com/",
+        "GitHub": "https://github.com/"
+      }
+    }
+  },
+  "intro": {
+    "file": "intro.mp4",
+    "duration_seconds": 8,
+    "caption": "AWS User Group Salerno"
+  },
+  "style": {
+    "mode": "longform",
+    "fps": 30,
+    "resolution": {
+      "w": 1920,
+      "h": 1080
+    },
+    "fade_seconds": 0.25,
+    "captions": {
+      "enabled": true
+    },
+    "music": {
+      "enabled": true,
+      "duck": true,
+      "volume": 0.1
+    },
+    "longform": {
+      "include_full_videos": true,
+      "trim_head_seconds": 0.0,
+      "trim_tail_seconds": 0.0,
+      "image_duration_seconds": 3.5,
+      "max_images_total": 80
+    }
+  },
+  "best_moments": {
+    "enabled": true,
+    "insert_in_timeline": true,
+    "max_clips_total": 12,
+    "max_moments_per_video": 2,
+    "clip_duration_seconds": 8,
+    "samples_per_video": 10,
+    "min_gap_seconds": 25
+  },
+  "outline": [
+    {
+      "title": "Intro",
+      "intent": "Logo + apertura evento",
+      "include": []
+    },
+    {
+      "title": "Best moments",
+      "intent": "Highlights rapidi per dare contesto",
+      "include": []
+    },
+    {
+      "title": "Welcome & agenda",
+      "intent": "Benvenuto, scaletta e obiettivi dell'AWS User Group Salerno",
+      "include": [
+        "welcome*",
+        "agenda*",
+        "opening*"
+      ]
+    },
+    {
+      "title": "Talk 1 — Cloud fundamentals",
+      "intent": "Prima sessione, concetti base e demo",
+      "include": [
+        "talk1*",
+        "*cloud*fundamentals*"
+      ]
+    },
+    {
+      "title": "Talk 2 — Serverless in pratica",
+      "intent": "Seconda sessione, esempi pratici e best practice",
+      "include": [
+        "talk2*",
+        "*serverless*"
+      ]
+    },
+    {
+      "title": "Networking & photo recap",
+      "intent": "Foto del pubblico, venue, networking, momenti social",
+      "include": []
+    },
+    {
+      "title": "Closing",
+      "intent": "Ringraziamenti, call-to-action, prossimi eventi",
+      "include": [
+        "closing*",
+        "outro*"
+      ]
+    }
+  ],
+  "seo": {
+    "enabled": true,
+    "cta": "👍 Lascia un like, iscriviti al canale e segui l'AWS User Group Salerno per i prossimi meetup!",
+    "hashtags": [
+      "#AWS",
+      "#AWSUserGroup",
+      "#Salerno",
+      "#CloudComputing",
+      "#Serverless",
+      "#DevOps",
+      "#Meetup"
+    ]
+  },
+  "ai": {
+    "enabled": true,
+    "enable_transcribe": true
+  }
+}

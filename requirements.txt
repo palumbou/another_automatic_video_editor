@@ -1,0 +1,10 @@
+# Core dependencies for Another Automatic Video Editor
+boto3>=1.35.0
+Pillow>=10.0.0
+
+# Testing dependencies
+pytest>=8.0.0
+moto>=5.0.0
+
+# Development dependencies
+ruff>=0.6.0

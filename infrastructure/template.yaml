@@ -1,0 +1,601 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Another Automatic Video Editor - AI-assisted slideshow/aftermovie generator on AWS.
+  S3 (input/output) + Step Functions + ECS Fargate (ffmpeg) + optional Transcribe + Rekognition + Bedrock.
+
+Parameters:
+  VpcCidr:
+    Type: String
+    Default: 10.20.0.0/16
+    Description: CIDR block for the dedicated VPC
+
+  ContainerImage:
+    Type: String
+    Default: public.ecr.aws/docker/library/python:3.11-slim
+    Description: Container image for the Fargate worker
+
+  FargateCpu:
+    Type: Number
+    Default: 2048
+    AllowedValues:
+      - 1024
+      - 2048
+      - 4096
+      - 8192
+      - 16384
+    Description: Fargate CPU units (1024=1 vCPU, 2048=2 vCPU, 4096=4 vCPU, ...)
+
+  FargateMemory:
+    Type: Number
+    Default: 4096
+    AllowedValues:
+      - 2048
+      - 3072
+      - 4096
+      - 5120
+      - 6144
+      - 7168
+      - 8192
+      - 16384
+      - 30720
+      - 61440
+      - 122880
+    Description: Fargate memory (MiB). Must be compatible with CPU selection.
+
+  EphemeralStorageGiB:
+    Type: Number
+    Default: 50
+    MinValue: 20
+    MaxValue: 200
+    Description: Ephemeral storage for the task (GiB)
+
+  AppPrefix:
+    Type: String
+    Default: app
+    Description: S3 prefix in the input bucket where the application code is uploaded
+
+  BedrockModelId:
+    Type: String
+    Default: amazon.nova-lite-v1:0
+    Description: Bedrock model ID (must be enabled in your account/region)
+
+  BedrockRegion:
+    Type: String
+    Default: ''
+    Description: >
+      Optional Bedrock region override (empty = use the stack region).
+      Useful if you deploy the stack in a region without Bedrock and want to call Bedrock elsewhere.
+
+  EnableTranscribe:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: Enable Amazon Transcribe for speech-to-text (more cost, better chapters)
+
+  LogRetentionDays:
+    Type: Number
+    Default: 14
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365]
+    Description: CloudWatch Logs retention period in days
+
+Conditions:
+  UseTranscribe: !Equals [!Ref EnableTranscribe, 'true']
+  UseBedrockRegionOverride: !Not [!Equals [!Ref BedrockRegion, '']]
+
+Resources:
+  # ---------------------------
+  # Networking (public-only VPC)
+  # ---------------------------
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-vpc'
+        - Key: CostCenter
+          Value: !Ref AWS::StackName
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-igw'
+        - Key: CostCenter
+          Value: !Ref AWS::StackName
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-public-rt'
+        - Key: CostCenter
+          Value: !Ref AWS::StackName
+
+  DefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Select [0, !Cidr [!Ref VpcCidr, 2, 8]]
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-public-a'
+        - Key: CostCenter
+          Value: !Ref AWS::StackName
+
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Select [1, !Cidr [!Ref VpcCidr, 2, 8]]
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-public-b'
+        - Key: CostCenter
+          Value: !Ref AWS::StackName
+
+  SubnetRouteTableAssociationA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref PublicRouteTable
+
+  SubnetRouteTableAssociationB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetB
+      RouteTableId: !Ref PublicRouteTable
+
+  FargateSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow outbound HTTPS for the render worker (no inbound).
+      VpcId: !Ref VPC
+      SecurityGroupIngress: []
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound (AWS APIs, S3, Bedrock, Rekognition, Transcribe)
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-fargate-sg'
+        - Key: CostCenter
+          Value: !Ref AWS::StackName
+
+  # ---------------------------
+  # Buckets (input/output)
+  # ---------------------------
+  InputBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-input'
+        - Key: CostCenter
+          Value: !Ref AWS::StackName
+
+  OutputBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-output'
+        - Key: CostCenter
+          Value: !Ref AWS::StackName
+
+  # Allow Transcribe service to read media from the input bucket (only if enabled)
+  InputBucketPolicyForTranscribe:
+    Type: AWS::S3::BucketPolicy
+    Condition: UseTranscribe
+    Properties:
+      Bucket: !Ref InputBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowTranscribeReadInput
+            Effect: Allow
+            Principal:
+              Service: transcribe.amazonaws.com
+            Action:
+              - s3:GetObject
+              - s3:ListBucket
+            Resource:
+              - !Sub '${InputBucket.Arn}'
+              - !Sub '${InputBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+
+  # ---------------------------
+  # Logging
+  # ---------------------------
+  WorkerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/ecs/${AWS::StackName}/worker'
+      RetentionInDays: !Ref LogRetentionDays
+      Tags:
+        - Key: Application
+          Value: !Ref AWS::StackName
+        - Key: Component
+          Value: Logging
+        - Key: CostCenter
+          Value: !Ref AWS::StackName
+
+  # ---------------------------
+  # ECS (Fargate worker)
+  # ---------------------------
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub '${AWS::StackName}-cluster'
+      Tags:
+        - Key: CostCenter
+          Value: !Ref AWS::StackName
+
+  ECSTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-ecs-exec'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Tags:
+        - Key: CostCenter
+          Value: !Ref AWS::StackName
+
+  ECSTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-ecs-task'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: WorkerPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: S3ReadInput
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub '${InputBucket.Arn}'
+                  - !Sub '${InputBucket.Arn}/*'
+              - Sid: S3WriteOutput
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:AbortMultipartUpload
+                  - s3:ListBucketMultipartUploads
+                  - s3:ListBucket
+                Resource:
+                  - !Sub '${OutputBucket.Arn}'
+                  - !Sub '${OutputBucket.Arn}/*'
+              - Sid: RekognitionLabels
+                Effect: Allow
+                Action:
+                  - rekognition:DetectLabels
+                  - rekognition:DetectText
+                Resource: '*'
+              - Sid: BedrockInvoke
+                Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                  - bedrock:Converse
+                  - bedrock:ConverseStream
+                Resource: '*'
+              - Sid: TranscribeJobs
+                Effect: Allow
+                Action:
+                  - transcribe:StartTranscriptionJob
+                  - transcribe:GetTranscriptionJob
+                  - transcribe:DeleteTranscriptionJob
+                Resource: '*'
+      Tags:
+        - Key: CostCenter
+          Value: !Ref AWS::StackName
+
+  WorkerTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${AWS::StackName}-worker'
+      Cpu: !Ref FargateCpu
+      Memory: !Ref FargateMemory
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      ExecutionRoleArn: !GetAtt ECSTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt ECSTaskRole.Arn
+      EphemeralStorage:
+        SizeInGiB: !Ref EphemeralStorageGiB
+      ContainerDefinitions:
+        - Name: worker
+          Image: !Ref ContainerImage
+          Essential: true
+          Environment:
+            - Name: INPUT_BUCKET
+              Value: !Ref InputBucket
+            - Name: OUTPUT_BUCKET
+              Value: !Ref OutputBucket
+            - Name: APP_PREFIX
+              Value: !Ref AppPrefix
+            - Name: BEDROCK_MODEL_ID
+              Value: !Ref BedrockModelId
+            - Name: BEDROCK_REGION
+              Value: !If [UseBedrockRegionOverride, !Ref BedrockRegion, !Ref AWS::Region]
+            - Name: ENABLE_TRANSCRIBE
+              Value: !Ref EnableTranscribe
+            - Name: AWS_REGION
+              Value: !Ref AWS::Region
+            - Name: LOG_LEVEL
+              Value: INFO
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref WorkerLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: worker
+          Command:
+            - bash
+            - -lc
+            - !Sub |
+                set -euo pipefail
+                echo "== Another Automatic Video Editor Worker =="
+                echo "JOB_ID=${JOB_ID:-<missing>}"
+                echo "INPUT_BUCKET=$INPUT_BUCKET"
+                echo "OUTPUT_BUCKET=$OUTPUT_BUCKET"
+                echo "APP_PREFIX=$APP_PREFIX"
+                echo "BEDROCK_MODEL_ID=$BEDROCK_MODEL_ID"
+                echo "BEDROCK_REGION=$BEDROCK_REGION"
+                echo "ENABLE_TRANSCRIBE=$ENABLE_TRANSCRIBE"
+                echo ""
+
+                if [ -z "${JOB_ID:-}" ]; then
+                  echo "Error: JOB_ID env var missing (passed by Step Functions)" >&2
+                  exit 1
+                fi
+
+                export DEBIAN_FRONTEND=noninteractive
+                apt-get update -qq
+                apt-get install -y -qq --no-install-recommends \
+                  ffmpeg imagemagick fonts-dejavu-core ca-certificates \
+                  && rm -rf /var/lib/apt/lists/*
+
+                python -m pip install --no-cache-dir --upgrade pip >/dev/null
+                python -m pip install --no-cache-dir boto3 Pillow >/dev/null
+
+                mkdir -p /work/app /work/job /work/out /work/tmp
+
+                echo "Downloading app code + job assets from S3..."
+                python - <<'PY'
+                import os, sys
+                import boto3
+
+                input_bucket = os.environ["INPUT_BUCKET"]
+                app_prefix   = os.environ["APP_PREFIX"].rstrip("/") + "/"
+                job_id       = os.environ["JOB_ID"]
+                job_prefix   = f"jobs/{job_id}/"
+
+                s3 = boto3.client("s3")
+
+                def download_prefix(prefix: str, dest_dir: str):
+                    paginator = s3.get_paginator("list_objects_v2")
+                    for page in paginator.paginate(Bucket=input_bucket, Prefix=prefix):
+                        for obj in page.get("Contents", []):
+                            key = obj["Key"]
+                            if key.endswith("/"):
+                                continue
+                            rel = key[len(prefix):]
+                            out_path = os.path.join(dest_dir, rel)
+                            os.makedirs(os.path.dirname(out_path), exist_ok=True)
+                            s3.download_file(input_bucket, key, out_path)
+
+                download_prefix(app_prefix, "/work/app")
+                download_prefix(job_prefix, "/work/job")
+
+                # Basic sanity check
+                manifest = "/work/job/manifest.json"
+                if not os.path.exists(manifest):
+                    print("Error: missing manifest.json in job folder", file=sys.stderr)
+                    sys.exit(2)
+                PY
+
+                echo "Running renderer..."
+                python /work/app/runner.py \
+                  --job-id "$JOB_ID" \
+                  --job-dir /work/job \
+                  --out-dir /work/out \
+                  --tmp-dir /work/tmp \
+                  --input-bucket "$INPUT_BUCKET" \
+                  --output-bucket "$OUTPUT_BUCKET" \
+                  --bedrock-model-id "$BEDROCK_MODEL_ID" \
+                  --bedrock-region "$BEDROCK_REGION" \
+                  --enable-transcribe "$ENABLE_TRANSCRIBE"
+
+                echo "Done."
+      Tags:
+        - Key: CostCenter
+          Value: !Ref AWS::StackName
+
+  # ---------------------------
+  # Step Functions
+  # ---------------------------
+  StepFunctionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-sfn'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StepFunctionsEcsRunTask
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: RunEcsTask
+                Effect: Allow
+                Action:
+                  - ecs:RunTask
+                  - ecs:StopTask
+                  - ecs:DescribeTasks
+                Resource: '*'
+              - Sid: PassRoles
+                Effect: Allow
+                Action: iam:PassRole
+                Resource:
+                  - !GetAtt ECSTaskExecutionRole.Arn
+                  - !GetAtt ECSTaskRole.Arn
+              - Sid: ManageEventBridgeForSync
+                Effect: Allow
+                Action:
+                  - events:PutRule
+                  - events:PutTargets
+                  - events:DescribeRule
+                  - events:DeleteRule
+                  - events:RemoveTargets
+                Resource: '*'
+      Tags:
+        - Key: CostCenter
+          Value: !Ref AWS::StackName
+
+  RenderStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub '${AWS::StackName}-render'
+      RoleArn: !GetAtt StepFunctionsRole.Arn
+      DefinitionString: !Sub |
+        {
+          "Comment": "Another Automatic Video Editor - run one ECS Fargate render task",
+          "StartAt": "Render",
+          "States": {
+            "Render": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::ecs:runTask.sync",
+              "TimeoutSeconds": 7200,
+              "Parameters": {
+                "LaunchType": "FARGATE",
+                "Cluster": "${ECSCluster.Arn}",
+                "TaskDefinition": "${WorkerTaskDefinition}",
+                "NetworkConfiguration": {
+                  "AwsvpcConfiguration": {
+                    "Subnets": ["${PublicSubnetA}", "${PublicSubnetB}"],
+                    "SecurityGroups": ["${FargateSecurityGroup}"],
+                    "AssignPublicIp": "ENABLED"
+                  }
+                },
+                "Overrides": {
+                  "ContainerOverrides": [
+                    {
+                      "Name": "worker",
+                      "Environment": [
+                        { "Name": "JOB_ID", "Value.$": "$.jobId" },
+                        { "Name": "BEDROCK_MODEL_ID", "Value.$": "$.bedrockModelId" },
+                        { "Name": "BEDROCK_REGION", "Value.$": "$.bedrockRegion" },
+                        { "Name": "ENABLE_TRANSCRIBE", "Value.$": "$.enableTranscribe" }
+                      ]
+                    }
+                  ]
+                }
+              },
+              "End": true
+            }
+          }
+        }
+      Tags:
+        - Key: CostCenter
+          Value: !Ref AWS::StackName
+
+Outputs:
+  InputBucketName:
+    Description: S3 bucket for job uploads and app code
+    Value: !Ref InputBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-InputBucket'
+
+  OutputBucketName:
+    Description: S3 bucket for rendered outputs
+    Value: !Ref OutputBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-OutputBucket'
+
+  StateMachineArn:
+    Description: Step Functions state machine to run render jobs
+    Value: !Ref RenderStateMachine
+    Export:
+      Name: !Sub '${AWS::StackName}-StateMachine'
+
+  WorkerLogGroupName:
+    Description: CloudWatch Logs group for the ECS worker
+    Value: !Ref WorkerLogGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-LogGroup'
+
+  ECSClusterArn:
+    Description: ECS Cluster ARN
+    Value: !GetAtt ECSCluster.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-ECSCluster'
+
+  VPCId:
+    Description: VPC ID
+    Value: !Ref VPC
+    Export:
+      Name: !Sub '${AWS::StackName}-VPC'

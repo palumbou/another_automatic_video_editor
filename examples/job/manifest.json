@@ -1,0 +1,67 @@
+{
+  "project": {
+    "title": "AWS User Group Salerno | 1° Evento",
+    "date": "",
+    "location": "Salerno, Italy",
+    "language": "it",
+    "youtube": {
+      "channel_name": "AWS User Group Salerno",
+      "tags": [
+        "AWS",
+        "Cloud",
+        "Serverless",
+        "Community",
+        "Meetup",
+        "Salerno"
+      ],
+      "links": {
+        "meetup": "https://www.meetup.com/",
+        "linkedin": "https://www.linkedin.com/",
+        "website": ""
+      }
+    }
+  },
+  "style": {
+    "target_duration_seconds": 180,
+    "fade_seconds": 0.5,
+    "fps": 30,
+    "resolution": {
+      "w": 1920,
+      "h": 1080
+    },
+    "captions": {
+      "enabled": true
+    },
+    "music": {
+      "enabled": true,
+      "duck": true,
+      "volume": 0.2,
+      "notes": "Put a royalty-free track in job/music/ (e.g. track.mp3). If missing, a simple generated placeholder will be used."
+    },
+    "mode": "aftermovie"
+  },
+  "outline": [
+    {
+      "title": "Intro & Venue",
+      "intent": "establishing shots, community, setup, branding"
+    },
+    {
+      "title": "Talk Highlights",
+      "intent": "short clips of speakers + audience reactions"
+    },
+    {
+      "title": "Networking",
+      "intent": "people, swag, coffee, conversations"
+    },
+    {
+      "title": "Closing & Next Meetup",
+      "intent": "call to action: subscribe, join the next event"
+    }
+  ],
+  "ai": {
+    "enabled": true
+  },
+  "best_moments": {
+    "enabled": false
+  }
+}

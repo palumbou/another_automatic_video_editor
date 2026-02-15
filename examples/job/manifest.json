@@ -21,8 +21,13 @@
       }
     }
   },
+  "intro": {
+    "file": "",
+    "duration_seconds": 5,
+    "caption": "AWS User Group Salerno"
+  },
   "style": {
-    "target_duration_seconds": 180,
+    "target_duration_seconds": 300,
     "fade_seconds": 0.5,
     "fps": 30,
     "resolution": {
@@ -35,7 +40,7 @@
     "music": {
       "enabled": true,
       "duck": true,
-      "volume": 0.2,
+      "volume": 0.45,
       "notes": "Put a royalty-free track in job/music/ (e.g. track.mp3). If missing, a simple generated placeholder will be used."
     },
     "mode": "aftermovie"

@@ -56,8 +56,8 @@ Parameters:
 
   BedrockModelId:
     Type: String
-    Default: amazon.nova-lite-v1:0
-    Description: Bedrock model ID (must be enabled in your account/region)
+    Default: us.amazon.nova-lite-v1:0
+    Description: Bedrock model ID or inference profile ARN (e.g., us.amazon.nova-lite-v1:0 for cross-region inference)
 
   BedrockRegion:
     Type: String
@@ -392,7 +392,7 @@ Resources:
           Command:
             - bash
             - -lc
-            - !Sub |
+            - |
                 set -euo pipefail
                 echo "== Another Automatic Video Editor Worker =="
                 echo "JOB_ID=${JOB_ID:-<missing>}"
@@ -454,6 +454,15 @@ Resources:
                     sys.exit(2)
                 PY
 
+                # Build optional AI flags
+                AI_FLAGS=""
+                if [ "${SKIP_AI_CHECK:-false}" = "true" ]; then
+                  AI_FLAGS="$AI_FLAGS --skip-ai-check"
+                fi
+                if [ "${REQUIRE_AI:-false}" = "true" ]; then
+                  AI_FLAGS="$AI_FLAGS --require-ai"
+                fi
+
                 echo "Running renderer..."
                 python /work/app/runner.py \
                   --job-id "$JOB_ID" \
@@ -464,7 +473,8 @@ Resources:
                   --output-bucket "$OUTPUT_BUCKET" \
                   --bedrock-model-id "$BEDROCK_MODEL_ID" \
                   --bedrock-region "$BEDROCK_REGION" \
-                  --enable-transcribe "$ENABLE_TRANSCRIBE"
+                  --enable-transcribe "$ENABLE_TRANSCRIBE" \
+                  $AI_FLAGS
 
                 echo "Done."
       Tags:
@@ -549,7 +559,9 @@ Resources:
                         { "Name": "JOB_ID", "Value.$": "$.jobId" },
                         { "Name": "BEDROCK_MODEL_ID", "Value.$": "$.bedrockModelId" },
                         { "Name": "BEDROCK_REGION", "Value.$": "$.bedrockRegion" },
-                        { "Name": "ENABLE_TRANSCRIBE", "Value.$": "$.enableTranscribe" }
+                        { "Name": "ENABLE_TRANSCRIBE", "Value.$": "$.enableTranscribe" },
+                        { "Name": "SKIP_AI_CHECK", "Value.$": "$.skipAiCheck" },
+                        { "Name": "REQUIRE_AI", "Value.$": "$.requireAi" }
                       ]
                     }
                   ]

@@ -42,7 +42,7 @@
     "music": {
       "enabled": true,
       "duck": true,
-      "volume": 0.1
+      "volume": 0.40
     },
     "longform": {
       "include_full_videos": true,

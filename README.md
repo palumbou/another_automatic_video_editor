@@ -4,17 +4,19 @@
 
 AWS mini-infrastructure (CloudFormation) + a single launcher script that turns a folder of **images + videos** into a **YouTube-ready MP4**, with:
 
+- **AI-driven planning** (AWS Bedrock) for intelligent video sequencing
 - **AI-driven analysis** (AWS Rekognition) of images / sampled video frames
 - Optional **speech-to-text** (AWS Transcribe) to improve chapter titles / description
 - Optional **"Best moments" extraction** (lightweight shot scoring) to build a highlights chapter
+- **AI connectivity check** before processing with interactive fallback options
 - Auto-generated:
   - `chapters.txt`
   - `description.md` (SEO-friendly, rigid template)
   - `title.txt`
 
-You provide a `manifest.json` (outline / constraints / YouTube links). The system outputs a final `output.mp4` you can upload directly to YouTube.
+You provide a `manifest.json` (outline / constraints / YouTube links). The system outputs a final `final.mp4` you can upload directly to YouTube.
 
-> Default Bedrock model: **Amazon Nova Lite** (`amazon.nova-lite-v1:0`).
+> Default Bedrock model: **Amazon Nova Lite** (`us.amazon.nova-lite-v1:0` inference profile).
 
 ## Architecture
 
@@ -52,9 +54,6 @@ another_automatic_video_editor/
 │   └── utils.py           # Utility functions
 ├── infrastructure/         # CloudFormation templates
 │   └── template.yaml
-├── scripts/               # Deployment scripts
-│   ├── deploy.sh
-│   └── README.md
 ├── docs/                  # Documentation
 │   └── INFRASTRUCTURE.md
 ├── examples/              # Example jobs
@@ -71,7 +70,7 @@ Set `style.mode` in your `manifest.json`:
 - `aftermovie` (default): short highlight-style video (e.g. 2–4 minutes)
 - `longform`: **full-length** event video (e.g. 30–120+ minutes)
 
-The longform mode is built **deterministically** (so it reliably includes your main videos), while Bedrock is used for **SEO/title/description**.
+Both modes use AI (Bedrock) for planning when available, with automatic fallback to deterministic planning if AI is unavailable.
 
 ## Quick Start
 
@@ -80,19 +79,14 @@ The longform mode is built **deterministically** (so it reliably includes your m
 - AWS CLI installed and configured
 - Python 3.11+
 - Valid AWS credentials with appropriate permissions
+- Bedrock model access enabled (Amazon Nova Lite recommended)
 
 ### 1) Create the AWS stack
 
 ```bash
 ./another_automatic_video_editor.sh create \
   --region eu-west-1 \
-  --bedrock-region eu-west-1
-```
-
-Or use the deploy script:
-
-```bash
-./scripts/deploy.sh --region eu-west-1
+  --bedrock-model-id us.amazon.nova-lite-v1:0
 ```
 
 ### 2) Run an example job
@@ -101,7 +95,6 @@ Or use the deploy script:
 
 ```bash
 ./another_automatic_video_editor.sh run \
-  --region eu-west-1 \
   --job-dir ./examples/job
 ```
 
@@ -110,7 +103,7 @@ Or use the deploy script:
 Put your media into:
 
 - `./examples/job_longform/media/`
-  - `intro.mp4` (first segment)
+  - `intro.jpg` or `intro.mp4` (first segment)
   - your full talk recordings (e.g. `talk1.mp4`, `talk2.mp4`)
   - photos
 
@@ -118,29 +111,95 @@ Then run:
 
 ```bash
 ./another_automatic_video_editor.sh run \
-  --region eu-west-1 \
   --job-dir ./examples/job_longform
 ```
 
 ### 3) Outputs
 
-The `run` command already waits for completion and downloads results locally.
+The `run` command waits for completion and downloads results locally.
 
 By default outputs go to `./another_automatic_video_editor_output/<JOB_ID>/`.
 
+## CLI Reference
+
+```bash
+./another_automatic_video_editor.sh <command> [options]
+```
+
+### Commands
+
+| Command | Description |
+|---------|-------------|
+| `create` | Deploy (or update) the CloudFormation stack |
+| `status` | Show stack status and important outputs |
+| `run` | Upload a job folder and run the workflow |
+| `delete` | Delete the CloudFormation stack (empties buckets first) |
+| `help` | Show help |
+
+### Common Options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--region <region>` | AWS region | `eu-west-1` |
+| `--name <stack-name>` | CloudFormation stack name | auto-generated |
+| `--yes` | Skip confirmation prompts | `false` |
+
+### Create Options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--bedrock-model-id <id>` | Bedrock model or inference profile | `us.amazon.nova-lite-v1:0` |
+| `--bedrock-region <region>` | Override Bedrock region | stack region |
+| `--cpu <units>` | Fargate CPU (1024-16384) | `2048` |
+| `--memory <MiB>` | Fargate memory | `4096` |
+| `--ephemeral-gib <GiB>` | Fargate storage (20-200) | `50` |
+| `--enable-transcribe <bool>` | Enable Amazon Transcribe | `true` |
+
+### Run Options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--job-dir <path>` | Job folder with manifest.json + media/ | required |
+| `--out-dir <path>` | Local output folder | `./another_automatic_video_editor_output` |
+| `--skip-ai-check` | Skip AI connectivity test | `false` |
+| `--require-ai` | Fail if AI unavailable (no fallback) | `false` |
+
+### AI Behavior Options
+
+The runner performs an AI connectivity check before processing media:
+
+- **Default**: Tests Bedrock, prompts user if unavailable (continue with fallback or abort)
+- `--skip-ai-check`: Skip the test, silently use fallback if AI fails later
+- `--require-ai`: Fail immediately if AI is not available
+
 ## Manifest Configuration
 
-### Force an intro as the first segment
+### Intro (first segment)
+
+Supports both images (jpg, png, etc.) and videos:
 
 ```json
 "intro": {
-  "file": "intro.mp4",
-  "duration_seconds": 8,
+  "file": "intro.jpg",
+  "duration_seconds": 5,
   "caption": "AWS User Group Salerno"
 }
 ```
 
-### Enable "Best moments" (shot scoring)
+### Music
+
+```json
+"music": {
+  "enabled": true,
+  "duck": true,
+  "volume": 0.45
+}
+```
+
+- `volume`: 0.0-1.0 (recommended: 0.40-0.50)
+- `duck`: Lower music volume when video has speech
+
+### Best Moments (shot scoring)
 
 ```json
 "best_moments": {
@@ -154,7 +213,7 @@ By default outputs go to `./another_automatic_video_editor_output/<JOB_ID>/`.
 }
 ```
 
-### SEO-friendly rigid template (override AI)
+### SEO Override
 
 ```json
 "seo": {
@@ -164,33 +223,62 @@ By default outputs go to `./another_automatic_video_editor_output/<JOB_ID>/`.
 }
 ```
 
+### AI Configuration
+
+```json
+"ai": {
+  "enabled": true,
+  "enable_transcribe": true
+}
+```
+
 ## Outputs
 
-The output bucket (and local download folder) contains:
+The output folder contains:
 
-- `output.mp4` — final video
-- `chapters.txt` — YouTube chapters (timestamps + titles)
-- `description.md` — SEO-friendly description (template + hashtags + links)
-- `title.txt` — suggested YouTube title
-- `catalog.json`, `plan.json`, `render_meta.json` — debug artifacts
-- `best_moments_top.json` — top scored highlight clips (if enabled)
+| File | Description |
+|------|-------------|
+| `final.mp4` | Final rendered video |
+| `video_no_music.mp4` | Video without music track |
+| `chapters.txt` | YouTube chapters (timestamps + titles) |
+| `description.md` | SEO-friendly YouTube description |
+| `title.txt` | Suggested YouTube title |
+| `catalog.json` | Media catalog with analysis |
+| `plan.json` | Video plan (AI or fallback) |
+| `render_meta.json` | Render metadata |
+| `best_moments_top.json` | Top scored clips (if enabled) |
+| `render.log` | Processing log |
 
 ## Documentation
 
 - [Infrastructure Guide](docs/INFRASTRUCTURE.md) - Complete infrastructure setup ([Italiano](docs/INFRASTRUCTURE.it.md))
-- [Scripts Documentation](scripts/README.md) - Script usage ([Italiano](scripts/README.it.md))
 
-## Clean up
+## Clean Up
+
+The delete command automatically empties S3 buckets before deletion:
 
 ```bash
 ./another_automatic_video_editor.sh delete --yes
 ```
 
-Or:
+Without `--yes`, you'll be prompted to confirm.
 
-```bash
-./scripts/deploy.sh --cleanup --yes
-```
+## Troubleshooting
+
+### AI not available
+
+If you see "Bedrock AI is NOT available", check:
+1. Model access is enabled in your AWS account
+2. You're using the correct inference profile (e.g., `us.amazon.nova-lite-v1:0` for US, `eu.amazon.nova-lite-v1:0` for EU)
+3. IAM permissions include `bedrock:Converse`
+
+### Music volume too low
+
+Increase `style.music.volume` in manifest (recommended: 0.40-0.50).
+
+### Not all media used
+
+For `aftermovie` mode, media is scaled to fit `target_duration_seconds`. Increase this value or use `longform` mode.
 
 ## License
 

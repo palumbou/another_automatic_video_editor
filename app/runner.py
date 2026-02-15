@@ -811,7 +811,10 @@ def concat_clips(clips: List[Path], out_path: Path) -> None:
     list_file = out_path.parent / "concat_list.txt"
     lines = []
     for c in clips:
-        lines.append(f"file {json.dumps(str(c))}")
+        # FFmpeg concat format requires: file 'path/to/file.mp4'
+        # Escape single quotes in path by replacing ' with '\''
+        escaped_path = str(c).replace("'", "'\\''")
+        lines.append(f"file '{escaped_path}'")
     list_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     run_cmd([
@@ -941,17 +944,35 @@ def heuristic_plan(
         return (0 if dt_str else 1, dt_str, it.get("filename", ""))
     items = sorted(items, key=sort_key)
 
+    # Count media to calculate per-item duration
+    n_images = sum(1 for it in items if it.get("type") == "image")
+    n_videos = sum(1 for it in items if it.get("type") == "video")
+    
+    # Default durations
+    default_img_dur = 4.0
+    default_vid_dur = 8.0
+    
+    # Estimate total duration with defaults
+    estimated_total = (n_images * default_img_dur) + (n_videos * default_vid_dur)
+    
+    # If estimated exceeds target, scale down durations (min 2s for images, 4s for videos)
+    # If estimated is less than target, use defaults (don't stretch unnecessarily)
+    scale = 1.0
+    if estimated_total > target and estimated_total > 0:
+        scale = target / estimated_total
+    
+    img_dur = max(2.0, default_img_dur * scale)
+    vid_dur_factor = max(0.5, scale)  # Scale factor for video duration
+
     segments: List[Dict[str, Any]] = []
     elapsed = 0.0
     chapter = 0
 
     for it in items:
-        if elapsed >= target:
-            break
         typ = it["type"]
         src_id = it["id"]
         if typ == "image":
-            dur = 4.0
+            dur = img_dur
             segments.append({
                 "source_id": src_id,
                 "type": "image",
@@ -962,7 +983,8 @@ def heuristic_plan(
             elapsed += dur
         elif typ == "video":
             vdur = float(it.get("duration_s") or 0.0)
-            dur = min(10.0, max(4.0, vdur * 0.15)) if vdur > 0 else 8.0
+            dur = min(10.0, max(4.0, vdur * 0.15 * vid_dur_factor)) if vdur > 0 else default_vid_dur * vid_dur_factor
+            dur = max(4.0, dur)  # Minimum 4s for videos
             start_s = max(0.0, (vdur / 2.0) - (dur / 2.0))
             segments.append({
                 "source_id": src_id,
@@ -975,8 +997,9 @@ def heuristic_plan(
             elapsed += dur
 
         if len(chapter_titles) > 1:
-            per = target / float(len(chapter_titles))
-            chapter = min(len(chapter_titles) - 1, int(elapsed // max(1.0, per)))
+            total_items = len(items)
+            items_per_chapter = max(1, total_items // len(chapter_titles))
+            chapter = min(len(chapter_titles) - 1, len(segments) // items_per_chapter)
 
     return {
         "video_title": manifest.get("project", {}).get("title", "Aftermovie"),
@@ -1688,19 +1711,38 @@ def bedrock_plan(
     system = (
         "You are an expert video editor assistant. "
         "Return ONLY valid JSON (no markdown, no commentary). "
-        "Do not include extra keys."
+        "Do not include extra keys. "
+        "IMPORTANT: You MUST include ALL media items from the catalog in your segments. Do not skip any."
     )
+
+    # Calculate realistic duration based on media count
+    n_images = sum(1 for it in items if it.get("type") == "image")
+    n_videos = sum(1 for it in items if it.get("type") == "video")
+    total_video_dur = sum(float(it.get("duration_s") or 0) for it in items if it.get("type") == "video")
+    
+    # Estimate: 4s per image, 10s per video clip (or full if longform)
+    estimated_duration = (n_images * 4) + min(total_video_dur, n_videos * 10)
+    
+    # Use the larger of target or estimated
+    effective_target = max(target, int(estimated_duration * 0.8))
 
     user_obj = {
         "task": "Create a storyboard/timeline for an event video / slideshow.",
+        "critical_requirements": {
+            "MUST_USE_ALL_MEDIA": True,
+            "total_media_items": len(items),
+            "images_count": n_images,
+            "videos_count": n_videos,
+            "minimum_segments_required": len(items),
+        },
         "constraints": {
-            "target_total_duration_seconds": target,
+            "target_total_duration_seconds": effective_target,
             "video_format": "YouTube-ready 1080p 30fps",
             "chapters_requirements": "At least 3 chapters, first starts at 0 seconds.",
             "no_duplicate_segments": True,
             "segment_duration_limits": {
-                "image_seconds": [3, 6],
-                "video_seconds": [4, 15],
+                "image_seconds": [3, 5],
+                "video_seconds": [5, 12],
             },
         },
         "project": project,
@@ -1712,7 +1754,7 @@ def bedrock_plan(
             "chapters": [{"title": "string"}],
             "segments": [
                 {
-                    "source_id": "string (must match a media id)",
+                    "source_id": "string (must match a media id from catalog)",
                     "type": "image|video",
                     "duration": "number (seconds)",
                     "chapter": "integer (index into chapters)",
@@ -1725,13 +1767,16 @@ def bedrock_plan(
 
     prompt = json.dumps(user_obj, ensure_ascii=False)
 
+    # Increase max_tokens for large catalogs
+    max_tokens = min(16000, max(4096, len(items) * 100))
+
     try:
         text = bedrock_chat_text(
             brt,
             model_id=model_id,
             system=system,
             user=prompt,
-            max_tokens=4096,
+            max_tokens=max_tokens,
             temperature=0.2,
         )
     except Exception as e:
@@ -1748,6 +1793,20 @@ def bedrock_plan(
         return None
     if not isinstance(plan.get("segments"), list) or not isinstance(plan.get("chapters"), list):
         return None
+    
+    # Validate that AI used most of the media (at least 70%)
+    used_ids = set(s.get("source_id") for s in plan.get("segments", []))
+    all_ids = set(it.get("id") for it in items)
+    coverage = len(used_ids & all_ids) / max(1, len(all_ids))
+    
+    if coverage < 0.7:
+        logging.warning("AI plan only used %.0f%% of media (%d/%d). Will use fallback.", 
+                       coverage * 100, len(used_ids & all_ids), len(all_ids))
+        return None
+    
+    logging.info("AI plan uses %.0f%% of media (%d/%d segments)", 
+                coverage * 100, len(used_ids & all_ids), len(all_ids))
+    
     return plan
 
 
@@ -1942,6 +2001,26 @@ def upload_outputs(
         s3.upload_file(str(p), output_bucket, key)
 
 
+def test_bedrock_connectivity(brt, model_id: str) -> Tuple[bool, str]:
+    """Test Bedrock connectivity with a simple prompt.
+    
+    Returns (success, error_message).
+    """
+    try:
+        resp = brt.converse(
+            modelId=model_id,
+            system=[{"text": "You are a test assistant."}],
+            messages=[{"role": "user", "content": [{"text": "Reply with exactly: OK"}]}],
+            inferenceConfig={"maxTokens": 10, "temperature": 0.0},
+        )
+        content = resp.get("output", {}).get("message", {}).get("content", [])
+        if content:
+            return True, ""
+        return False, "Empty response from Bedrock"
+    except Exception as e:
+        return False, str(e)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Another Automatic Video Editor runner (ECS worker).")
     parser.add_argument("--job-id", required=True)
@@ -1953,6 +2032,8 @@ def main() -> int:
     parser.add_argument("--bedrock-model-id", required=True)
     parser.add_argument("--bedrock-region", required=True)
     parser.add_argument("--enable-transcribe", required=True)
+    parser.add_argument("--skip-ai-check", action="store_true", help="Skip AI connectivity check and use fallback if AI fails")
+    parser.add_argument("--require-ai", action="store_true", help="Fail immediately if AI is not available (no fallback)")
 
     args = parser.parse_args()
 
@@ -1987,6 +2068,56 @@ def main() -> int:
     stack_region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or args.bedrock_region
     bedrock_region = args.bedrock_region or stack_region
 
+    # --------------------
+    # AI connectivity check (before heavy processing)
+    # --------------------
+    ai_enabled = bool(manifest.get("ai", {}).get("enabled", True))
+    ai_available = False
+    
+    if ai_enabled and not args.skip_ai_check:
+        logging.info("Testing Bedrock connectivity (model: %s, region: %s)...", args.bedrock_model_id, bedrock_region)
+        try:
+            brt_test = bedrock_runtime_client(bedrock_region)
+            ai_available, ai_error = test_bedrock_connectivity(brt_test, args.bedrock_model_id)
+        except Exception as e:
+            ai_available = False
+            ai_error = str(e)
+        
+        if ai_available:
+            logging.info("✓ Bedrock AI is available and working")
+        else:
+            logging.warning("✗ Bedrock AI is NOT available: %s", ai_error)
+            
+            if args.require_ai:
+                logging.error("AI is required (--require-ai flag) but not available. Aborting.")
+                return 1
+            
+            # Interactive prompt (only if running in a terminal)
+            if sys.stdin.isatty():
+                print("\n" + "=" * 60)
+                print("⚠️  WARNING: AI (Bedrock) is not available!")
+                print(f"   Error: {ai_error}")
+                print("=" * 60)
+                print("\nOptions:")
+                print("  [c] Continue with fallback (deterministic plan, no AI)")
+                print("  [a] Abort and fix the issue")
+                print("")
+                try:
+                    choice = input("Your choice [c/a]: ").strip().lower()
+                    if choice == 'a':
+                        logging.info("User chose to abort.")
+                        return 1
+                    logging.info("User chose to continue with fallback.")
+                except (EOFError, KeyboardInterrupt):
+                    logging.info("No input received, continuing with fallback.")
+            else:
+                logging.info("Non-interactive mode: continuing with fallback plan.")
+            
+            ai_enabled = False  # Disable AI for this run
+    elif args.skip_ai_check:
+        logging.info("Skipping AI connectivity check (--skip-ai-check flag)")
+        ai_available = True  # Assume available, will fallback if it fails later
+
     catalog = build_catalog(
         reko_region=stack_region,
         enable_transcribe=enable_transcribe,
@@ -1999,7 +2130,6 @@ def main() -> int:
     safe_json_dump(catalog, out_dir / "catalog.json")
 
     plan: Optional[Dict[str, Any]] = None
-    ai_enabled = bool(manifest.get("ai", {}).get("enabled", True))
 
     mode = get_style_mode(manifest)
     logging.info("Style mode: %s", mode)
@@ -2013,22 +2143,28 @@ def main() -> int:
     # --------------------
     # Build plan
     # --------------------
-    if mode == "longform":
-        plan = longform_plan(manifest=manifest, catalog=catalog)
-    else:
-        if ai_enabled:
-            try:
-                brt = bedrock_runtime_client(bedrock_region)
-                plan = bedrock_plan(
-                    brt=brt,
-                    model_id=args.bedrock_model_id,
-                    manifest=manifest,
-                    catalog=catalog,
-                )
-            except Exception as e:
-                logging.warning("AI planning failed (fallback to heuristic): %s", e)
+    # Always try AI first if enabled, regardless of mode
+    if ai_enabled:
+        try:
+            brt = bedrock_runtime_client(bedrock_region)
+            plan = bedrock_plan(
+                brt=brt,
+                model_id=args.bedrock_model_id,
+                manifest=manifest,
+                catalog=catalog,
+            )
+            if plan:
+                logging.info("AI planning succeeded")
+        except Exception as e:
+            logging.warning("AI planning failed: %s", e)
 
-        if not plan:
+    # Fallback to deterministic plan if AI failed or disabled
+    if not plan:
+        if mode == "longform":
+            logging.info("Using deterministic longform plan (AI fallback)")
+            plan = longform_plan(manifest=manifest, catalog=catalog)
+        else:
+            logging.info("Using heuristic plan (AI fallback)")
             plan = heuristic_plan(manifest=manifest, catalog=catalog)
 
         # Optional: force an intro segment at the beginning

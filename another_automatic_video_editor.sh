@@ -64,8 +64,12 @@ STACK_NAME=""
 YES="false"
 
 # Bedrock defaults
-BEDROCK_MODEL_ID="amazon.nova-lite-v1:0"
+BEDROCK_MODEL_ID="us.amazon.nova-lite-v1:0"
 BEDROCK_REGION="" # empty => stack region
+
+# AI behavior
+SKIP_AI_CHECK="false"
+REQUIRE_AI="false"
 
 # Worker sizing defaults (match template defaults)
 CPU="2048"
@@ -110,6 +114,8 @@ Create Options:
 Run Options:
   --job-dir <path>                  Folder containing manifest.json + media/
   --out-dir <path>                  Local output folder (default: ./another_automatic_video_editor_output)
+  --skip-ai-check                   Skip AI connectivity test (use fallback if AI fails)
+  --require-ai                      Fail if AI is not available (no fallback)
 
 Examples:
   # Create infra
@@ -150,6 +156,8 @@ while [ $# -gt 0 ]; do
 
     --job-dir) JOB_DIR="${2:-}"; shift 2;;
     --out-dir) OUTPUT_DIR="${2:-}"; shift 2;;
+    --skip-ai-check) SKIP_AI_CHECK="true"; shift 1;;
+    --require-ai) REQUIRE_AI="true"; shift 1;;
 
     -h|--help|help) COMMAND="help"; shift 1;;
     *)
@@ -282,7 +290,22 @@ cmd_delete() {
   require_aws
 
   if [ -z "$STACK_NAME" ]; then
-    die "--name <stack-name> is required for delete (or run status first to auto-select)."
+    # Try auto-select like status
+    local candidate
+    candidate="$(aws cloudformation list-stacks --region "$REGION" \
+      --query 'StackSummaries[?starts_with(StackName, `another-automatic-video-editor-`) && StackStatus!=`DELETE_COMPLETE`]|sort_by(@,&CreationTime)[-1].StackName' \
+      --output text 2>/dev/null || true)"
+
+    if [ -n "$candidate" ] && [ "$candidate" != "None" ]; then
+      STACK_NAME="$candidate"
+      log "Auto-selected stack: $STACK_NAME"
+    else
+      die "No --name provided and no existing stack found in region $REGION."
+    fi
+  fi
+
+  if ! stack_exists "$STACK_NAME"; then
+    die "Stack not found: $STACK_NAME (region: $REGION)"
   fi
 
   if [ "$YES" != "true" ]; then
@@ -293,13 +316,30 @@ cmd_delete() {
     fi
   fi
 
+  # Get bucket names before deletion
+  local outputs_json
+  outputs_json="$(get_stack_outputs_json "$STACK_NAME")" || true
+  local in_bucket out_bucket
+  in_bucket="$(get_output_value "$outputs_json" "InputBucketName")" || true
+  out_bucket="$(get_output_value "$outputs_json" "OutputBucketName")" || true
+
+  # Empty buckets before stack deletion (CloudFormation can't delete non-empty buckets)
+  if [ -n "$in_bucket" ]; then
+    log "Emptying input bucket: $in_bucket ..."
+    aws s3 rm "s3://$in_bucket" --recursive --region "$REGION" 2>/dev/null || true
+  fi
+  if [ -n "$out_bucket" ]; then
+    log "Emptying output bucket: $out_bucket ..."
+    aws s3 rm "s3://$out_bucket" --recursive --region "$REGION" 2>/dev/null || true
+  fi
+
   log "Deleting stack: $STACK_NAME"
   aws cloudformation delete-stack --stack-name "$STACK_NAME" --region "$REGION"
 
   log "Waiting for deletion to complete..."
   aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME" --region "$REGION" || true
 
-  log "✓ Delete requested/completed (check CloudFormation events if it hangs)."
+  log "✓ Stack deleted."
 }
 
 cmd_run() {
@@ -353,15 +393,29 @@ PY
     >/dev/null
 
   # Prepare Step Functions input
+  # Determine correct inference profile prefix based on region
+  local bedrock_model="$BEDROCK_MODEL_ID"
+  if [[ "$bedrock_model" == us.amazon.nova-* ]] && [[ ! "$REGION" == us-* ]]; then
+    # Auto-switch to EU profile for non-US regions
+    bedrock_model="${bedrock_model/us.amazon/eu.amazon}"
+    log "Auto-switched Bedrock model to: $bedrock_model (for region $REGION)"
+  elif [[ "$bedrock_model" == eu.amazon.nova-* ]] && [[ "$REGION" == us-* ]]; then
+    # Auto-switch to US profile for US regions
+    bedrock_model="${bedrock_model/eu.amazon/us.amazon}"
+    log "Auto-switched Bedrock model to: $bedrock_model (for region $REGION)"
+  fi
+
   mkdir -p "$OUTPUT_DIR"
   local input_json
   input_json="$(python3 - <<PY
 import json
 payload = {
   "jobId": "$job_id",
-  "bedrockModelId": "$BEDROCK_MODEL_ID",
+  "bedrockModelId": "$bedrock_model",
   "bedrockRegion": "${BEDROCK_REGION:-$REGION}",
-  "enableTranscribe": "$ENABLE_TRANSCRIBE"
+  "enableTranscribe": "$ENABLE_TRANSCRIBE",
+  "skipAiCheck": "$SKIP_AI_CHECK",
+  "requireAi": "$REQUIRE_AI"
 }
 print(json.dumps(payload))
 PY

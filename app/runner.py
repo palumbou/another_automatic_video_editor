@@ -35,7 +35,7 @@ AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
 # Small helpers
 # -----------------------------
 def now_utc() -> str:
-    return dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def sha1_short(s: str, n: int = 8) -> str:
@@ -900,16 +900,17 @@ def mix_music(
     
     if duck:
         # Sidechain compress: music ducks when video audio is loud
-        # - threshold=0.015: trigger ducking at low audio levels (more sensitive)
-        # - ratio=12: stronger compression ratio for more noticeable ducking
-        # - attack=30: faster response to speech
-        # - release=600: smooth return after speech
-        # - level_sc controls how much the sidechain affects compression
-        # duck_amount controls the makeup gain (lower = quieter during speech)
+        # - threshold=0.01: trigger ducking at low audio levels (very sensitive)
+        # - ratio=20: strong compression for noticeable ducking
+        # - attack=5: very fast response to speech
+        # - release=500: smooth return after speech
+        # After compression, apply duck_amount as additional volume reduction
+        # The amix weights control final balance (1 = full video, duck_amount = reduced music)
         fc = (
             f"{music_input};"
-            f"[bgvol][0:a]sidechaincompress=threshold=0.015:ratio=12:attack=30:release=600:level_in=1:level_sc=1.5:makeup={duck_amount}[bgduck];"
-            f"[0:a][bgduck]amix=inputs=2:duration=first:weights=1 0.7:dropout_transition=0[mixed];"
+            f"[bgvol][0:a]sidechaincompress=threshold=0.01:ratio=20:attack=5:release=500:level_in=1:level_sc=2[bgduck];"
+            f"[bgduck]volume={duck_amount}[bgduckvol];"
+            f"[0:a][bgduckvol]amix=inputs=2:duration=first:weights=1 1:dropout_transition=0[mixed];"
             f"[mixed]afade=t=out:st={fade_start}:d={fade_out_s}[aout]"
         )
     else:

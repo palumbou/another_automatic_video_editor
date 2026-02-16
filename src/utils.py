@@ -19,7 +19,7 @@ AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
 
 def now_utc() -> str:
     """Return current UTC time as ISO string."""
-    return dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def sha1_short(s: str, n: int = 8) -> str:

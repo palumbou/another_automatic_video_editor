@@ -34,6 +34,7 @@
       "w": 1920,
       "h": 1080
     },
+    "normalize_audio": true,
     "captions": {
       "enabled": true
     },

@@ -36,6 +36,7 @@
       "h": 1080
     },
     "fade_seconds": 0.25,
+    "normalize_audio": true,
     "captions": {
       "enabled": true
     },

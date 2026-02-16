@@ -40,6 +40,8 @@
     "music": {
       "enabled": true,
       "duck": true,
+      "duck_amount": 0.15,
+      "loop": true,
       "volume": 0.45,
       "notes": "Put a royalty-free track in job/music/ (e.g. track.mp3). If missing, a simple generated placeholder will be used."
     },

@@ -739,6 +739,7 @@ def make_video_clip(
     target_w: int,
     target_h: int,
     enable_captions: bool,
+    normalize_audio: bool = True,
 ) -> None:
     dur = max(0.5, float(duration))
     fade = min(fade_s, dur / 3.0)
@@ -761,10 +762,16 @@ def make_video_clip(
 
     vf = ",".join(vf_parts)
 
-    af = ",".join([
+    # Audio filter: fade + optional loudnorm normalization
+    af_parts = [
         f"afade=t=in:st=0:d={fade}",
         f"afade=t=out:st={max(0.0, dur - fade)}:d={fade}",
-    ])
+    ]
+    if normalize_audio:
+        # loudnorm normalizes audio to -14 LUFS (YouTube standard)
+        af_parts.append("loudnorm=I=-14:TP=-1:LRA=11")
+    
+    af = ",".join(af_parts)
 
     info = ffprobe_video(video_path)
 
@@ -862,52 +869,60 @@ def mix_music(
     *,
     music_volume: float = 0.20,
     duck: bool = True,
+    duck_amount: float = 0.15,
+    loop: bool = True,
     video_duration_s: float = 0.0,
     fade_out_s: float = 3.0,
 ) -> None:
     """Mix background music with video audio.
     
-    - Loops music if shorter than video
-    - Ducks music when video has speech (sidechaincompress)
-    - Adds fade out at the end
+    Args:
+        music_volume: Base volume for music (0.0-1.0)
+        duck: Enable ducking (lower music when speech detected)
+        duck_amount: Volume multiplier during ducking (0.0-1.0, lower = more ducking)
+        loop: Loop music if shorter than video
+        fade_out_s: Fade out duration at end
     """
     # Get video duration if not provided
     if video_duration_s <= 0:
         info = ffprobe_video(main_video)
         video_duration_s = info.duration_s
     
-    # Build filter complex
-    # 1. Loop music to cover full video duration
-    # 2. Apply volume
-    # 3. Duck when video audio is present (sidechain compress)
-    # 4. Mix with video audio (video audio is primary)
-    # 5. Fade out at the end
-    
     fade_start = max(0, video_duration_s - fade_out_s)
+    
+    # Music input handling (loop or not)
+    if loop:
+        music_input = f"[1:a]aloop=loop=-1:size=2e+09,atrim=0:{video_duration_s},volume={music_volume}[bgvol]"
+        stream_loop_args = ["-stream_loop", "-1"]
+    else:
+        music_input = f"[1:a]volume={music_volume}[bgvol]"
+        stream_loop_args = []
     
     if duck:
         # Sidechain compress: music ducks when video audio is loud
-        # - threshold=0.02: trigger ducking at low audio levels
-        # - ratio=8: moderate compression ratio
-        # - attack=50: quick response to speech
-        # - release=800: smooth return after speech
+        # - threshold=0.015: trigger ducking at low audio levels (more sensitive)
+        # - ratio=12: stronger compression ratio for more noticeable ducking
+        # - attack=30: faster response to speech
+        # - release=600: smooth return after speech
+        # - level_sc controls how much the sidechain affects compression
+        # duck_amount controls the makeup gain (lower = quieter during speech)
         fc = (
-            f"[1:a]aloop=loop=-1:size=2e+09,atrim=0:{video_duration_s},volume={music_volume}[bgvol];"
-            f"[bgvol][0:a]sidechaincompress=threshold=0.02:ratio=8:attack=50:release=800:level_in=1:level_sc=1[bgduck];"
-            f"[0:a][bgduck]amix=inputs=2:duration=first:weights=1 0.8:dropout_transition=0[mixed];"
+            f"{music_input};"
+            f"[bgvol][0:a]sidechaincompress=threshold=0.015:ratio=12:attack=30:release=600:level_in=1:level_sc=1.5:makeup={duck_amount}[bgduck];"
+            f"[0:a][bgduck]amix=inputs=2:duration=first:weights=1 0.7:dropout_transition=0[mixed];"
             f"[mixed]afade=t=out:st={fade_start}:d={fade_out_s}[aout]"
         )
     else:
         fc = (
-            f"[1:a]aloop=loop=-1:size=2e+09,atrim=0:{video_duration_s},volume={music_volume}[bgvol];"
+            f"{music_input};"
             f"[0:a][bgvol]amix=inputs=2:duration=first:weights=1 0.6:dropout_transition=0[mixed];"
             f"[mixed]afade=t=out:st={fade_start}:d={fade_out_s}[aout]"
         )
 
-    run_cmd([
+    cmd = [
         "ffmpeg", "-y",
         "-i", str(main_video),
-        "-stream_loop", "-1",  # Loop music input
+    ] + stream_loop_args + [
         "-i", str(music_audio),
         "-filter_complex", fc,
         "-map", "0:v",
@@ -915,10 +930,12 @@ def mix_music(
         "-c:v", "copy",
         "-c:a", "aac",
         "-b:a", "192k",
-        "-t", str(video_duration_s),  # Limit to video duration
+        "-t", str(video_duration_s),
         "-movflags", "+faststart",
         str(out_path),
-    ])
+    ]
+    
+    run_cmd(cmd)
 
 
 def generate_placeholder_music(out_path: Path, *, duration_s: float) -> None:
@@ -1919,6 +1936,7 @@ def render_from_plan(
     target_w = int(res.get("w", 1920))
     target_h = int(res.get("h", 1080))
     captions_enabled = bool(style.get("captions", {}).get("enabled", True))
+    normalize_audio = bool(style.get("normalize_audio", True))
 
     clips_dir = tmp_dir / "clips"
     ensure_dir(clips_dir)
@@ -1976,6 +1994,7 @@ def render_from_plan(
                 target_w=target_w,
                 target_h=target_h,
                 enable_captions=captions_enabled,
+                normalize_audio=normalize_audio,
             )
 
         clips.append(clip)
@@ -1992,6 +2011,8 @@ def render_from_plan(
     music_conf = style.get("music", {}) or {}
     music_enabled = bool(music_conf.get("enabled", True))
     music_duck = bool(music_conf.get("duck", True))
+    music_duck_amount = float(music_conf.get("duck_amount", 0.15) or 0.15)
+    music_loop = bool(music_conf.get("loop", True))
     music_vol = float(music_conf.get("volume", 0.20))
     
     # Fade out configuration
@@ -2007,6 +2028,8 @@ def render_from_plan(
             no_music, music_path, final,
             music_volume=music_vol,
             duck=music_duck,
+            duck_amount=music_duck_amount,
+            loop=music_loop,
             video_duration_s=total_dur,
             fade_out_s=fade_out_s,
         )

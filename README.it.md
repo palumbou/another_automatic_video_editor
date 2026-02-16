@@ -192,12 +192,27 @@ Supporta sia immagini (jpg, png, ecc.) che video:
 "music": {
   "enabled": true,
   "duck": true,
+  "duck_amount": 0.15,
+  "loop": true,
   "volume": 0.45
 }
 ```
 
-- `volume`: 0.0-1.0 (consigliato: 0.40-0.50)
-- `duck`: Abbassa il volume della musica quando il video ha parlato
+- `enabled`: Attiva/disattiva musica di sottofondo
+- `volume`: Volume base della musica (0.0-1.0, consigliato: 0.40-0.50)
+- `duck`: Abbassa automaticamente la musica quando c'è parlato nel video
+- `duck_amount`: Quanto abbassare durante il ducking (0.0-1.0, più basso = più abbassamento, default: 0.15)
+- `loop`: Ripete la musica se più corta del video (default: true)
+
+### Normalizzazione Audio
+
+```json
+"style": {
+  "normalize_audio": true
+}
+```
+
+Normalizza automaticamente il volume di tutti i video clip a -14 LUFS (standard YouTube), così video con volumi diversi avranno lo stesso livello.
 
 ### Best Moments (shot scoring)
 

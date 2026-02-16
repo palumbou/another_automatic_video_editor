@@ -42,6 +42,8 @@
     "music": {
       "enabled": true,
       "duck": true,
+      "duck_amount": 0.15,
+      "loop": true,
       "volume": 0.40
     },
     "longform": {

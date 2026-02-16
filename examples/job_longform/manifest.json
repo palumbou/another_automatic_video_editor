@@ -126,6 +126,9 @@
   },
   "ai": {
     "enabled": true,
-    "enable_transcribe": true
+    "enable_transcribe": true,
+    "system_prompt": "You are an expert video editor for tech conferences and meetups. Create professional, well-paced longform videos. Return ONLY valid JSON. CRITICAL: Use ALL media items and order them CHRONOLOGICALLY.",
+    "task_prompt": "Create a complete longform video of this AWS User Group event, including all talks, Q&A sessions, and networking moments.",
+    "extra_instructions": "Follow the outline structure. Include full video segments for talks. Mix photos naturally between sections based on their timestamps. Ensure smooth transitions between chapters."
   }
 }

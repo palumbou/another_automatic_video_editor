@@ -827,6 +827,34 @@ def concat_clips(clips: List[Path], out_path: Path) -> None:
     ])
 
 
+def add_final_fade_out(
+    input_video: Path,
+    out_path: Path,
+    *,
+    fade_duration_s: float = 3.0,
+) -> None:
+    """Add fade to black at the end of the video."""
+    info = ffprobe_video(input_video)
+    fade_start = max(0, info.duration_s - fade_duration_s)
+    
+    vf = f"fade=t=out:st={fade_start}:d={fade_duration_s}:color=black"
+    af = f"afade=t=out:st={fade_start}:d={fade_duration_s}"
+    
+    run_cmd([
+        "ffmpeg", "-y",
+        "-i", str(input_video),
+        "-vf", vf,
+        "-af", af,
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-crf", "20",
+        "-c:a", "aac",
+        "-b:a", "192k",
+        "-movflags", "+faststart",
+        str(out_path),
+    ])
+
+
 def mix_music(
     main_video: Path,
     music_audio: Path,
@@ -834,22 +862,52 @@ def mix_music(
     *,
     music_volume: float = 0.20,
     duck: bool = True,
+    video_duration_s: float = 0.0,
+    fade_out_s: float = 3.0,
 ) -> None:
+    """Mix background music with video audio.
+    
+    - Loops music if shorter than video
+    - Ducks music when video has speech (sidechaincompress)
+    - Adds fade out at the end
+    """
+    # Get video duration if not provided
+    if video_duration_s <= 0:
+        info = ffprobe_video(main_video)
+        video_duration_s = info.duration_s
+    
+    # Build filter complex
+    # 1. Loop music to cover full video duration
+    # 2. Apply volume
+    # 3. Duck when video audio is present (sidechain compress)
+    # 4. Mix with video audio (video audio is primary)
+    # 5. Fade out at the end
+    
+    fade_start = max(0, video_duration_s - fade_out_s)
+    
     if duck:
+        # Sidechain compress: music ducks when video audio is loud
+        # - threshold=0.02: trigger ducking at low audio levels
+        # - ratio=8: moderate compression ratio
+        # - attack=50: quick response to speech
+        # - release=800: smooth return after speech
         fc = (
-            f"[1:a]volume={music_volume}[bg];"
-            f"[bg][0:a]sidechaincompress=threshold=0.05:ratio=12:attack=20:release=2000[bgduck];"
-            f"[0:a][bgduck]amix=inputs=2:duration=first:dropout_transition=2[aout]"
+            f"[1:a]aloop=loop=-1:size=2e+09,atrim=0:{video_duration_s},volume={music_volume}[bgvol];"
+            f"[bgvol][0:a]sidechaincompress=threshold=0.02:ratio=8:attack=50:release=800:level_in=1:level_sc=1[bgduck];"
+            f"[0:a][bgduck]amix=inputs=2:duration=first:weights=1 0.8:dropout_transition=0[mixed];"
+            f"[mixed]afade=t=out:st={fade_start}:d={fade_out_s}[aout]"
         )
     else:
         fc = (
-            f"[1:a]volume={music_volume}[bg];"
-            f"[0:a][bg]amix=inputs=2:duration=first:dropout_transition=2[aout]"
+            f"[1:a]aloop=loop=-1:size=2e+09,atrim=0:{video_duration_s},volume={music_volume}[bgvol];"
+            f"[0:a][bgvol]amix=inputs=2:duration=first:weights=1 0.6:dropout_transition=0[mixed];"
+            f"[mixed]afade=t=out:st={fade_start}:d={fade_out_s}[aout]"
         )
 
     run_cmd([
         "ffmpeg", "-y",
         "-i", str(main_video),
+        "-stream_loop", "-1",  # Loop music input
         "-i", str(music_audio),
         "-filter_complex", fc,
         "-map", "0:v",
@@ -857,7 +915,7 @@ def mix_music(
         "-c:v", "copy",
         "-c:a", "aac",
         "-b:a", "192k",
-        "-shortest",
+        "-t", str(video_duration_s),  # Limit to video duration
         "-movflags", "+faststart",
         str(out_path),
     ])
@@ -1706,14 +1764,22 @@ def bedrock_plan(
                 "duration_s": round(float(it.get("duration_s") or 0.0), 2),
                 "labels": it.get("labels", [])[:7],
                 "transcript_excerpt": (it.get("transcript_excerpt") or "")[:300],
+                "exif_datetime": it.get("exif_datetime"),
             })
 
-    system = (
+    # Get AI prompt configuration from manifest (or use defaults)
+    ai_conf = manifest.get("ai", {}) or {}
+    
+    # System prompt (configurable)
+    default_system = (
         "You are an expert video editor assistant. "
         "Return ONLY valid JSON (no markdown, no commentary). "
         "Do not include extra keys. "
-        "IMPORTANT: You MUST include ALL media items from the catalog in your segments. Do not skip any."
+        "CRITICAL: You MUST include ALL media items from the catalog in your segments. Do not skip any. "
+        "CRITICAL: Order segments CHRONOLOGICALLY based on exif_datetime or filename. "
+        "Mix images and videos naturally based on their timestamps - do NOT group all images together."
     )
+    system = str(ai_conf.get("system_prompt", default_system) or default_system)
 
     # Calculate realistic duration based on media count
     n_images = sum(1 for it in items if it.get("type") == "image")
@@ -1726,10 +1792,19 @@ def bedrock_plan(
     # Use the larger of target or estimated
     effective_target = max(target, int(estimated_duration * 0.8))
 
+    # Default task prompt (configurable)
+    default_task = "Create a storyboard/timeline for an event video / slideshow."
+    task_prompt = str(ai_conf.get("task_prompt", default_task) or default_task)
+    
+    # Additional instructions from manifest
+    extra_instructions = str(ai_conf.get("extra_instructions", "") or "")
+
     user_obj = {
-        "task": "Create a storyboard/timeline for an event video / slideshow.",
+        "task": task_prompt,
+        "extra_instructions": extra_instructions if extra_instructions else None,
         "critical_requirements": {
             "MUST_USE_ALL_MEDIA": True,
+            "CHRONOLOGICAL_ORDER": "Order segments by exif_datetime or filename timestamp. Mix images and videos naturally.",
             "total_media_items": len(items),
             "images_count": n_images,
             "videos_count": n_videos,
@@ -1764,6 +1839,9 @@ def bedrock_plan(
             ]
         }
     }
+    
+    # Remove None values
+    user_obj = {k: v for k, v in user_obj.items() if v is not None}
 
     prompt = json.dumps(user_obj, ensure_ascii=False)
 
@@ -1902,31 +1980,51 @@ def render_from_plan(
 
         clips.append(clip)
 
-    no_music = out_dir / "video_no_music.mp4"
+    # Generate output filename prefix from project title
+    project_title = manifest.get("project", {}).get("title", "video") or "video"
+    # Sanitize for filename: replace spaces and special chars
+    safe_title = re.sub(r'[^\w\-]', '_', project_title)
+    safe_title = re.sub(r'_+', '_', safe_title).strip('_')[:50]  # Limit length
+    
+    no_music = out_dir / f"{safe_title}_no_music.mp4"
     concat_clips(clips, no_music)
 
     music_conf = style.get("music", {}) or {}
     music_enabled = bool(music_conf.get("enabled", True))
     music_duck = bool(music_conf.get("duck", True))
     music_vol = float(music_conf.get("volume", 0.20))
+    
+    # Fade out configuration
+    fade_out_s = float(style.get("fade_out_seconds", 3.0) or 3.0)
 
-    final = out_dir / "final.mp4"
+    final = out_dir / f"{safe_title}_final.mp4"
     total_dur = sum(s.duration for s in segments)
 
     if music_enabled:
         music_path, generated = pick_music(job_dir, tmp_dir, total_dur)
-        mix_music(no_music, music_path, final, music_volume=music_vol, duck=music_duck)
+        # Mix music with loop, ducking, and fade out
+        mix_music(
+            no_music, music_path, final,
+            music_volume=music_vol,
+            duck=music_duck,
+            video_duration_s=total_dur,
+            fade_out_s=fade_out_s,
+        )
         return {
             "final_video": str(final),
+            "no_music_video": str(no_music),
             "music_path": str(music_path),
             "music_generated": generated,
             "segments_count": len(segments),
             "total_duration_s": total_dur,
         }
 
-    final.write_bytes(no_music.read_bytes())
+    # No music - just add fade out
+    final_with_fade = out_dir / f"{safe_title}_final.mp4"
+    add_final_fade_out(no_music, final_with_fade, fade_duration_s=fade_out_s)
     return {
-        "final_video": str(final),
+        "final_video": str(final_with_fade),
+        "no_music_video": str(no_music),
         "music_path": None,
         "music_generated": False,
         "segments_count": len(segments),
@@ -2167,24 +2265,35 @@ def main() -> int:
             logging.info("Using heuristic plan (AI fallback)")
             plan = heuristic_plan(manifest=manifest, catalog=catalog)
 
-        # Optional: force an intro segment at the beginning
-        intro_conf = manifest.get("intro", {}) or {}
-        intro_file = str(intro_conf.get("file") or intro_conf.get("asset") or "").strip()
-        intro_id = resolve_source_id_by_filename(catalog, intro_file) if intro_file else None
-        if intro_id:
-            intro_item = next((it for it in catalog.get("items", []) if it.get("id") == intro_id), None)
-            if intro_item:
+    # Always force intro segment at the beginning (if configured)
+    intro_conf = manifest.get("intro", {}) or {}
+    intro_file = str(intro_conf.get("file") or intro_conf.get("asset") or "").strip()
+    intro_id = resolve_source_id_by_filename(catalog, intro_file) if intro_file else None
+    
+    if intro_id:
+        intro_item = next((it for it in catalog.get("items", []) if it.get("id") == intro_id), None)
+        if intro_item:
+            # Check if intro is already the first segment
+            existing_segments = plan.get("segments", []) or []
+            first_seg_id = existing_segments[0].get("source_id") if existing_segments else None
+            
+            if first_seg_id != intro_id:
+                logging.info("Adding intro segment: %s", intro_file)
                 chapters = plan.get("chapters", []) or []
-                # Insert an explicit Intro chapter at the beginning, shift existing segment chapters by +1
-                plan["chapters"] = ([{"title": "Intro"}] + chapters)
-                for s in plan.get("segments", []) or []:
-                    try:
-                        s["chapter"] = int(s.get("chapter", 0)) + 1
-                    except Exception:
-                        s["chapter"] = 1
+                
+                # Only add Intro chapter if not already present
+                if not chapters or str(chapters[0].get("title", "")).lower() != "intro":
+                    plan["chapters"] = [{"title": "Intro"}] + chapters
+                    # Shift existing segment chapters by +1
+                    for s in existing_segments:
+                        try:
+                            s["chapter"] = int(s.get("chapter", 0)) + 1
+                        except Exception:
+                            s["chapter"] = 1
 
                 intro_dur = float(intro_conf.get("duration_seconds", 0.0) or 0.0)
                 intro_caption = str(intro_conf.get("caption", "") or "").strip()
+                
                 if intro_item.get("type") == "video":
                     vdur = float(intro_item.get("duration_s") or 0.0)
                     dur = intro_dur if intro_dur > 0 else min(10.0, vdur if vdur > 0 else 10.0)
@@ -2206,7 +2315,10 @@ def main() -> int:
                         "caption": intro_caption or "Intro",
                     }
 
-                plan["segments"] = [intro_seg] + (plan.get("segments", []) or [])
+                # Remove intro from existing segments if present elsewhere
+                plan["segments"] = [intro_seg] + [s for s in existing_segments if s.get("source_id") != intro_id]
+            else:
+                logging.info("Intro already first segment: %s", intro_file)
 
     safe_json_dump(plan, out_dir / "plan.json")
 

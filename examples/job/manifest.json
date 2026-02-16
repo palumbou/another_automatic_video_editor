@@ -64,7 +64,10 @@
     }
   ],
   "ai": {
-    "enabled": true
+    "enabled": true,
+    "system_prompt": "You are an expert video editor for tech community events. Create engaging, dynamic sequences that capture the energy of meetups. Return ONLY valid JSON.",
+    "task_prompt": "Create a short aftermovie (2-4 minutes) highlighting the best moments of this AWS User Group meetup.",
+    "extra_instructions": "Prioritize shots with people, speakers, and audience reactions. Start with venue/setup shots, build energy through talks, end with networking and call-to-action."
   },
   "best_moments": {
     "enabled": false

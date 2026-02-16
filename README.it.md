@@ -228,9 +228,22 @@ Supporta sia immagini (jpg, png, ecc.) che video:
 ```json
 "ai": {
   "enabled": true,
-  "enable_transcribe": true
+  "enable_transcribe": true,
+  "system_prompt": "",
+  "task_prompt": "",
+  "extra_instructions": ""
 }
 ```
+
+- `enabled`: Abilita pianificazione AI (Bedrock)
+- `enable_transcribe`: Abilita speech-to-text per trascrizioni video
+- `system_prompt`: Prompt di sistema personalizzato per AI (lascia vuoto per default)
+- `task_prompt`: Descrizione task personalizzata (lascia vuoto per default)
+- `extra_instructions`: Istruzioni aggiuntive per la pianificazione AI
+
+### Fade Out
+
+Il video include automaticamente un fade to black alla fine (audio + video). Durata default: 3 secondi.
 
 ## Output
 
@@ -238,8 +251,8 @@ La cartella output contiene:
 
 | File | Descrizione |
 |------|-------------|
-| `final.mp4` | Video finale renderizzato |
-| `video_no_music.mp4` | Video senza traccia musicale |
+| `{titolo}_final.mp4` | Video finale renderizzato |
+| `{titolo}_no_music.mp4` | Video senza traccia musicale |
 | `chapters.txt` | Capitoli YouTube (timestamp + titoli) |
 | `description.md` | Descrizione YouTube SEO-friendly |
 | `title.txt` | Titolo YouTube suggerito |
@@ -248,6 +261,8 @@ La cartella output contiene:
 | `render_meta.json` | Metadati render |
 | `best_moments_top.json` | Clip con punteggio più alto (se abilitato) |
 | `render.log` | Log elaborazione |
+
+I nomi dei file video usano il titolo del progetto dal manifest come prefisso.
 
 ## Documentazione
 

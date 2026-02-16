@@ -1790,6 +1790,9 @@ def bedrock_plan(
 
     # Get AI prompt configuration from manifest (or use defaults)
     ai_conf = manifest.get("ai", {}) or {}
+    mode = style.get("mode", "aftermovie")
+    longform_conf = style.get("longform", {}) or {}
+    include_full_videos = bool(longform_conf.get("include_full_videos", True))
     
     # System prompt (configurable)
     default_system = (
@@ -1797,6 +1800,7 @@ def bedrock_plan(
         "Return ONLY valid JSON (no markdown, no commentary). "
         "Do not include extra keys. "
         "CRITICAL: You MUST include ALL media items from the catalog in your segments. Do not skip any. "
+        "CRITICAL: You MUST include ALL videos - every single video file must appear in segments. "
         "CRITICAL: Order segments CHRONOLOGICALLY based on exif_datetime or filename. "
         "Mix images and videos naturally based on their timestamps - do NOT group all images together."
     )
@@ -1807,8 +1811,11 @@ def bedrock_plan(
     n_videos = sum(1 for it in items if it.get("type") == "video")
     total_video_dur = sum(float(it.get("duration_s") or 0) for it in items if it.get("type") == "video")
     
-    # Estimate: 4s per image, 10s per video clip (or full if longform)
-    estimated_duration = (n_images * 4) + min(total_video_dur, n_videos * 10)
+    # For longform mode with include_full_videos, use full video duration
+    if mode == "longform" and include_full_videos:
+        estimated_duration = (n_images * 4) + total_video_dur
+    else:
+        estimated_duration = (n_images * 4) + min(total_video_dur, n_videos * 10)
     
     # Use the larger of target or estimated
     effective_target = max(target, int(estimated_duration * 0.8))
@@ -1819,17 +1826,42 @@ def bedrock_plan(
     
     # Additional instructions from manifest
     extra_instructions = str(ai_conf.get("extra_instructions", "") or "")
+    
+    # Video duration constraints based on mode and settings
+    if mode == "longform" and include_full_videos:
+        video_duration_instruction = "For videos, use their FULL duration (duration_s from catalog). Do NOT trim or shorten videos."
+        video_seconds_range = "full duration from catalog"
+    else:
+        video_duration_instruction = "For videos, use 5-12 second clips."
+        video_seconds_range = [5, 12]
+
+    # Build explicit list of video IDs that MUST be included
+    video_ids_list = [it["id"] for it in items if it.get("type") == "video"]
+    video_details = []
+    for it in items:
+        if it.get("type") == "video":
+            video_details.append({
+                "id": it["id"],
+                "filename": it.get("filename"),
+                "duration_s": round(float(it.get("duration_s") or 0), 2),
+            })
 
     user_obj = {
         "task": task_prompt,
         "extra_instructions": extra_instructions if extra_instructions else None,
+        "mode": mode,
+        "include_full_videos": include_full_videos,
         "critical_requirements": {
             "MUST_USE_ALL_MEDIA": True,
+            "MUST_USE_ALL_VIDEOS": f"There are {n_videos} videos. You MUST include ALL of them: {video_ids_list}",
+            "VIDEO_IDS_REQUIRED": video_ids_list,
+            "VIDEO_DETAILS": video_details,
             "CHRONOLOGICAL_ORDER": "Order segments by exif_datetime or filename timestamp. Mix images and videos naturally.",
             "total_media_items": len(items),
             "images_count": n_images,
             "videos_count": n_videos,
             "minimum_segments_required": len(items),
+            "video_duration_rule": video_duration_instruction,
         },
         "constraints": {
             "target_total_duration_seconds": effective_target,
@@ -1838,7 +1870,7 @@ def bedrock_plan(
             "no_duplicate_segments": True,
             "segment_duration_limits": {
                 "image_seconds": [3, 5],
-                "video_seconds": [5, 12],
+                "video_seconds": video_seconds_range,
             },
         },
         "project": project,
@@ -1852,7 +1884,7 @@ def bedrock_plan(
                 {
                     "source_id": "string (must match a media id from catalog)",
                     "type": "image|video",
-                    "duration": "number (seconds)",
+                    "duration": "number (seconds - for videos use duration_s from catalog if include_full_videos is true)",
                     "chapter": "integer (index into chapters)",
                     "caption": "string (short, can be empty)",
                     "in_seconds": "number (seconds, only for video; for images omit or set 0)"
@@ -1898,13 +1930,24 @@ def bedrock_plan(
     all_ids = set(it.get("id") for it in items)
     coverage = len(used_ids & all_ids) / max(1, len(all_ids))
     
+    # Also check video coverage specifically - videos are important
+    video_ids = set(it.get("id") for it in items if it.get("type") == "video")
+    used_video_ids = used_ids & video_ids
+    video_coverage = len(used_video_ids) / max(1, len(video_ids)) if video_ids else 1.0
+    
     if coverage < 0.7:
         logging.warning("AI plan only used %.0f%% of media (%d/%d). Will use fallback.", 
                        coverage * 100, len(used_ids & all_ids), len(all_ids))
         return None
     
-    logging.info("AI plan uses %.0f%% of media (%d/%d segments)", 
-                coverage * 100, len(used_ids & all_ids), len(all_ids))
+    if video_ids and video_coverage < 0.9:
+        logging.warning("AI plan only used %.0f%% of videos (%d/%d). Will use fallback.", 
+                       video_coverage * 100, len(used_video_ids), len(video_ids))
+        return None
+    
+    logging.info("AI plan uses %.0f%% of media (%d/%d), %.0f%% of videos (%d/%d)", 
+                coverage * 100, len(used_ids & all_ids), len(all_ids),
+                video_coverage * 100, len(used_video_ids), len(video_ids))
     
     return plan
 

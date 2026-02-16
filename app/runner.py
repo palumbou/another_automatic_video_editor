@@ -762,14 +762,17 @@ def make_video_clip(
 
     vf = ",".join(vf_parts)
 
-    # Audio filter: fade + optional loudnorm normalization
+    # Audio filter: fade + optional normalization
     af_parts = [
         f"afade=t=in:st=0:d={fade}",
         f"afade=t=out:st={max(0.0, dur - fade)}:d={fade}",
     ]
     if normalize_audio:
-        # loudnorm normalizes audio to -14 LUFS (YouTube standard)
-        af_parts.append("loudnorm=I=-14:TP=-1:LRA=11")
+        # dynaudnorm: dynamic audio normalization (simpler and more robust than loudnorm)
+        # - framelen=500: 500ms analysis window
+        # - gausssize=31: smoothing window
+        # - peak=0.95: target peak level
+        af_parts.append("dynaudnorm=f=500:g=31:p=0.95")
     
     af = ",".join(af_parts)
 
@@ -879,7 +882,7 @@ def mix_music(
     Args:
         music_volume: Base volume for music (0.0-1.0)
         duck: Enable ducking (lower music when speech detected)
-        duck_amount: Volume multiplier during ducking (0.0-1.0, lower = more ducking)
+        duck_amount: Volume during ducking (0.0-1.0, lower = quieter when speech)
         loop: Loop music if shorter than video
         fade_out_s: Fade out duration at end
     """
@@ -890,40 +893,40 @@ def mix_music(
     
     fade_start = max(0, video_duration_s - fade_out_s)
     
-    # Music input handling (loop or not)
+    # Build filter complex
+    # Music: loop (if enabled), trim to video duration, apply volume
     if loop:
-        music_input = f"[1:a]aloop=loop=-1:size=2e+09,atrim=0:{video_duration_s},volume={music_volume}[bgvol]"
-        stream_loop_args = ["-stream_loop", "-1"]
+        music_filter = f"[1:a]aloop=loop=-1:size=2e+09,atrim=0:{video_duration_s},volume={music_volume}[bg]"
     else:
-        music_input = f"[1:a]volume={music_volume}[bgvol]"
-        stream_loop_args = []
+        music_filter = f"[1:a]volume={music_volume}[bg]"
     
     if duck:
-        # Sidechain compress: music ducks when video audio is loud
-        # - threshold=0.01: trigger ducking at low audio levels (very sensitive)
-        # - ratio=20: strong compression for noticeable ducking
-        # - attack=5: very fast response to speech
-        # - release=500: smooth return after speech
-        # After compression, apply duck_amount as additional volume reduction
-        # The amix weights control final balance (1 = full video, duck_amount = reduced music)
+        # Sidechain compress: music ducks when video audio is present
+        # Then apply duck_amount as final volume adjustment
+        # Using simpler params to avoid audio corruption
         fc = (
-            f"{music_input};"
-            f"[bgvol][0:a]sidechaincompress=threshold=0.01:ratio=20:attack=5:release=500:level_in=1:level_sc=2[bgduck];"
-            f"[bgduck]volume={duck_amount}[bgduckvol];"
-            f"[0:a][bgduckvol]amix=inputs=2:duration=first:weights=1 1:dropout_transition=0[mixed];"
+            f"{music_filter};"
+            f"[bg][0:a]sidechaincompress=threshold=0.02:ratio=6:attack=10:release=400[bgduck];"
+            f"[bgduck]volume={duck_amount}[bgfinal];"
+            f"[0:a][bgfinal]amix=inputs=2:duration=first:dropout_transition=0[mixed];"
             f"[mixed]afade=t=out:st={fade_start}:d={fade_out_s}[aout]"
         )
     else:
         fc = (
-            f"{music_input};"
-            f"[0:a][bgvol]amix=inputs=2:duration=first:weights=1 0.6:dropout_transition=0[mixed];"
+            f"{music_filter};"
+            f"[0:a][bg]amix=inputs=2:duration=first:dropout_transition=0[mixed];"
             f"[mixed]afade=t=out:st={fade_start}:d={fade_out_s}[aout]"
         )
 
     cmd = [
         "ffmpeg", "-y",
         "-i", str(main_video),
-    ] + stream_loop_args + [
+    ]
+    
+    if loop:
+        cmd.extend(["-stream_loop", "-1"])
+    
+    cmd.extend([
         "-i", str(music_audio),
         "-filter_complex", fc,
         "-map", "0:v",
@@ -934,7 +937,7 @@ def mix_music(
         "-t", str(video_duration_s),
         "-movflags", "+faststart",
         str(out_path),
-    ]
+    ])
     
     run_cmd(cmd)
 

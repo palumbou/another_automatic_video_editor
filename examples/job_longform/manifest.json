@@ -43,7 +43,7 @@
     "music": {
       "enabled": true,
       "duck": true,
-      "duck_amount": 0.15,
+      "duck_amount": 0.3,
       "loop": true,
       "volume": 0.40
     },

@@ -872,7 +872,7 @@ def mix_music(
     *,
     music_volume: float = 0.20,
     duck: bool = True,
-    duck_amount: float = 0.15,
+    duck_amount: float = 0.3,
     loop: bool = True,
     video_duration_s: float = 0.0,
     fade_out_s: float = 3.0,
@@ -880,9 +880,10 @@ def mix_music(
     """Mix background music with video audio.
     
     Args:
-        music_volume: Base volume for music (0.0-1.0)
+        music_volume: Base volume for music (0.0-1.0) - this is the volume when NO speech
         duck: Enable ducking (lower music when speech detected)
-        duck_amount: Volume during ducking (0.0-1.0, lower = quieter when speech)
+        duck_amount: Target volume DURING ducking (0.0-1.0 relative to music_volume)
+                     e.g., 0.3 means music drops to 30% of music_volume when speech detected
         loop: Loop music if shorter than video
         fade_out_s: Fade out duration at end
     """
@@ -894,7 +895,7 @@ def mix_music(
     fade_start = max(0, video_duration_s - fade_out_s)
     
     # Build filter complex
-    # Music: loop (if enabled), trim to video duration, apply volume
+    # Music: loop (if enabled), trim to video duration, apply base volume
     if loop:
         music_filter = f"[1:a]aloop=loop=-1:size=2e+09,atrim=0:{video_duration_s},volume={music_volume}[bg]"
     else:
@@ -902,13 +903,16 @@ def mix_music(
     
     if duck:
         # Sidechain compress: music ducks when video audio is present
-        # Then apply duck_amount as final volume adjustment
-        # Using simpler params to avoid audio corruption
+        # The compression ratio and threshold control how much ducking happens
+        # Higher ratio = more ducking, lower threshold = triggers on quieter audio
+        # 
+        # We use a high ratio to get strong ducking effect
+        # The music stays at music_volume when no speech, drops significantly when speech
+        ratio = max(4, int(1.0 / max(0.1, duck_amount)))  # Higher ratio = more ducking
         fc = (
             f"{music_filter};"
-            f"[bg][0:a]sidechaincompress=threshold=0.02:ratio=6:attack=10:release=400[bgduck];"
-            f"[bgduck]volume={duck_amount}[bgfinal];"
-            f"[0:a][bgfinal]amix=inputs=2:duration=first:dropout_transition=0[mixed];"
+            f"[bg][0:a]sidechaincompress=threshold=0.01:ratio={ratio}:attack=20:release=300:level_sc=1[bgduck];"
+            f"[0:a][bgduck]amix=inputs=2:duration=first:dropout_transition=0[mixed];"
             f"[mixed]afade=t=out:st={fade_start}:d={fade_out_s}[aout]"
         )
     else:

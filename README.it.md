@@ -192,16 +192,16 @@ Supporta sia immagini (jpg, png, ecc.) che video:
 "music": {
   "enabled": true,
   "duck": true,
-  "duck_amount": 0.15,
+  "duck_amount": 0.3,
   "loop": true,
   "volume": 0.45
 }
 ```
 
 - `enabled`: Attiva/disattiva musica di sottofondo
-- `volume`: Volume base della musica (0.0-1.0, consigliato: 0.40-0.50)
+- `volume`: Volume base della musica quando NON c'è parlato (0.0-1.0, consigliato: 0.40-0.50)
 - `duck`: Abbassa automaticamente la musica quando c'è parlato nel video
-- `duck_amount`: Quanto abbassare durante il ducking (0.0-1.0, più basso = più abbassamento, default: 0.15)
+- `duck_amount`: Quanto scende la musica DURANTE il parlato (0.0-1.0, es. 0.3 = scende al 30% del volume)
 - `loop`: Ripete la musica se più corta del video (default: true)
 
 ### Normalizzazione Audio
